@@ -1,4 +1,5 @@
 # Gerenciamento Seguro de Acesso Administrativo com `sudo` no Ubuntu
+## Versão Aprimorada - Padrão LPI-3
 
 ### Objetivo
 Padronizar, restringir e auditar o acesso privilegiado (`sudo`) no ambiente Linux com foco em segurança empresarial, auditoria detalhada e compliance, substituindo permissões diretas por uma abordagem segura baseada em grupos e funções.
@@ -65,11 +66,11 @@ getent group | grep admin-
 ### 2. Adicionar usuários aos grupos apropriados
 ```bash
 # Administradores completos (acesso total)
-sudo usermod -aG admin-full george
-sudo usermod -aG admin-full vmadmin
+sudo usermod -aG admin-full usuario1
+sudo usermod -aG admin-full usuario2
 
 # Administradores de serviços específicos
-sudo usermod -aG admin-service serviceuser
+sudo usermod -aG admin-service usuario3
 
 # Verificar membros dos grupos
 for group in admin-full admin-service admin-network admin-automation; do
@@ -347,7 +348,7 @@ echo "Usuários no grupo sudo antes da limpeza:"
 getent group sudo
 
 # Remover usuários (após confirmar que estão nos novos grupos)
-for user in vmadmin george; do
+for user in usuario1 usuario2; do
     if id -nG $user | grep -q admin-full; then
         sudo gpasswd -d $user sudo
         echo "Usuário $user removido do grupo sudo"
@@ -364,8 +365,8 @@ echo "Arquivos sudoers individuais encontrados:"
 ls -la /etc/sudoers.d/ | grep -v "admin-"
 
 # Remover arquivos específicos (exemplo)
-# sudo rm /etc/sudoers.d/vmadmin-nopasswd
-# sudo rm /etc/sudoers.d/george-individual
+# sudo rm /etc/sudoers.d/usuario1-nopasswd
+# sudo rm /etc/sudoers.d/usuario2-individual
 ```
 
 ---
@@ -479,8 +480,8 @@ ssh root@servidor
 
 ---
 
-**Autor:** George Oliveira  
-**Versão:** 2.0
+**Autor:** Documentação Técnica Linux  
+**Versão:** 2.0 - LPI-3 Enhanced  
 **Última atualização:** 2025-07-26  
 **Licença:** MIT  
 **Revisão Técnica:** Baseada em padrões LPI-3, ISO 27001 e NIST Cybersecurity Framework
