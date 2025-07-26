@@ -31,8 +31,8 @@ sudo groupadd admin
 ### 2. Adicionar usuários confiáveis ao grupo
 
 ```bash
-sudo usermod -aG admin vmadmin
-sudo usermod -aG admin george
+sudo usermod -aG admin 'usuario'
+sudo usermod -aG admin 'usuario'
 ```
 
 Verifique os membros do grupo:
