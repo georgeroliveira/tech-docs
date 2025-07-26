@@ -51,7 +51,7 @@ Abra o editor seguro:
 sudo visudo -f /etc/sudoers.d/admin
 ```
 
-#### ➕ Exigir senha:
+#### Exigir senha:
 ```sudoers
 %admin ALL=(ALL:ALL) ALL
 ```
