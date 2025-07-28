@@ -671,7 +671,7 @@ Para mais informações, consulte:
 
 ---
 
-**Autor**: Especialista em Cibersegurança  
+**Autor**: George Oliveira 
 **Versão**: 1.0  
 **Data**: 2025  
 **Licença**: Creative Commons Attribution 4.0
