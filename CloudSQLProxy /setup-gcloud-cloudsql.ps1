@@ -5,31 +5,19 @@
  Autor:      George Rodrigues de Oliveira
  GitHub:     https://github.com/georgeroliveira
  Licença:    MIT
- Versão:     1.0
- Data:       2025-07-27
+ Versão:     1.1 - CORRIGIDO
+ Data:       2025-07-30
  Descrição:  Conexão ao Cloud SQL com autenticação humana
 ===========================================================
-#>
-
-<#
-.SYNOPSIS
-    Script para conectar ao Cloud SQL via Proxy em Windows com login de usuário humano.
-
-.DESCRIPTION
-    Instala/atualiza Google Cloud SDK e Cloud SQL Proxy, força login de usuário humano
-    somente se necessário, e conecta à instância PostgreSQL do Google Cloud Platform.
-
-.EXAMPLE
-    .\CloudSQLProxy.ps1
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string]$ProjetoGCP = "plataformagovdigital-gcp-main",
+    [string]$ProjetoGCP = "meu-projeto-gcp",
 
     [Parameter(Mandatory = $false)]
-    [string]$InstanciaGCP = "plataformagovdigital-gcp-main:southamerica-east1:cluster-postgresql-dev",
+    [string]$InstanciaGCP = "meu-projeto-gcp:regiao:cluster-bd-dev",
 
     [Parameter(Mandatory = $false)]
     [ValidatePattern('^v\d+\.\d+\.\d+$')]
@@ -82,9 +70,9 @@ function Test-CommandExists {
 function Invoke-WithRetry {
     param(
         [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock,
+        [Parameter(Mandatory = $false)][string]$ActionDescription = "Operação",
         [Parameter(Mandatory = $false)][int]$MaxRetries = $Config.MaxRetries,
-        [Parameter(Mandatory = $false)][int]$DelaySeconds = $Config.RetryDelaySeconds,
-        [Parameter(Mandatory = $false)][string]$ActionDescription = "Operação"
+        [Parameter(Mandatory = $false)][int]$DelaySeconds = $Config.RetryDelaySeconds
     )
     for ($i = 1; $i -le $MaxRetries; $i++) {
         try {
@@ -112,8 +100,10 @@ function Install-GCloudSDK {
         Write-ColoredMessage "Instalação do gcloud foi pulada conforme solicitado" -Type Warning
         throw "Google Cloud SDK não encontrado e instalação foi pulada"
     }
+    
     Write-ColoredMessage "Google Cloud SDK não encontrado. Iniciando instalação..." -Type Info
-    try {
+    
+    Invoke-WithRetry -ActionDescription "Instalação do Google Cloud SDK" -ScriptBlock {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $Config.GCloudInstallerUrl -OutFile $Paths.GCloudInstaller -UseBasicParsing -ErrorAction Stop
         $process = Start-Process -FilePath $Paths.GCloudInstaller -Wait -PassThru
@@ -121,10 +111,8 @@ function Install-GCloudSDK {
             throw "Instalador falhou com código de saída - $($process.ExitCode)"
         }
         $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
-    } catch {
-        Write-ColoredMessage "Erro ao instalar Google Cloud SDK - $($_.Exception.Message)" -Type Error
-        throw
-    } finally {
+        
+        # Cleanup
         if (Test-Path $Paths.GCloudInstaller) {
             try { Remove-Item $Paths.GCloudInstaller -Force -ErrorAction SilentlyContinue } catch {}
         }
@@ -143,96 +131,162 @@ function Install-CloudSQLProxy {
             try { Remove-Item $Paths.ProxyFinal -Force -ErrorAction SilentlyContinue } catch {}
         }
     }
+    
     Write-ColoredMessage "Instalando Cloud SQL Proxy versão $ProxyVersion..." -Type Info
-    try {
+    
+    Invoke-WithRetry -ActionDescription "Download do Cloud SQL Proxy" -ScriptBlock {
         if (-not (Test-Path $ProxyDir)) {
             New-Item -Path $ProxyDir -ItemType Directory -Force | Out-Null
         }
+        
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $webClient = New-Object System.Net.WebClient
         $webClient.Headers.Add("User-Agent", "PowerShell CloudSQL Script")
+        
         try {
             $webClient.DownloadFile($Paths.ProxyUrl, $Paths.ProxyTemp)
-        } finally { $webClient.Dispose() }
-        if (-not (Test-Path $Paths.ProxyTemp)) { throw "Falha no download do proxy" }
+        } finally { 
+            $webClient.Dispose() 
+        }
+        
+        if (-not (Test-Path $Paths.ProxyTemp)) { 
+            throw "Falha no download do proxy" 
+        }
+        
         $fileInfo = Get-Item $Paths.ProxyTemp
-        if ($fileInfo.Length -eq 0) { throw "Arquivo baixado está vazio" }
+        if ($fileInfo.Length -eq 0) { 
+            throw "Arquivo baixado está vazio" 
+        }
+        
         Move-Item -Path $Paths.ProxyTemp -Destination $Paths.ProxyFinal -Force
+        
         $versionOutput = & $Paths.ProxyFinal --version 2>&1
         Write-ColoredMessage "Cloud SQL Proxy instalado com sucesso - $($Paths.ProxyFinal)" -Type Success
         Write-ColoredMessage "Versão - $versionOutput" -Type Info
-    } catch {
-        Write-ColoredMessage "Erro ao instalar Cloud SQL Proxy - $($_.Exception.Message)" -Type Error
-        @($Paths.ProxyTemp, $Paths.ProxyFinal) | ForEach-Object {
-            if (Test-Path $_) { try { Remove-Item $_ -Force -ErrorAction SilentlyContinue } catch {} }
+        
+        # Cleanup em caso de erro
+        if ($LASTEXITCODE -ne 0) {
+            @($Paths.ProxyTemp, $Paths.ProxyFinal) | ForEach-Object {
+                if (Test-Path $_) { 
+                    try { Remove-Item $_ -Force -ErrorAction SilentlyContinue } catch {} 
+                }
+            }
+            throw "Proxy não está funcionando corretamente"
         }
-        throw
     }
 }
 
 function Ensure-HumanAuth {
     $activeUser = & gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>$null
-    if (-not $activeUser -or $activeUser -match "compute@developer\\.gserviceaccount\\.com") {
+    
+    if (-not $activeUser -or $activeUser -match "compute@developer\.gserviceaccount\.com") {
         Write-ColoredMessage "Login necessário! Será aberto o navegador para autenticação Google." -Type Warning
-        Write-ColoredMessage "Use uma conta humana do GCP com permissão no projeto: $ProjetoGCP" -Type Info
-        Read-Host "Pressione Enter para abrir o navegador e fazer login"
-        & gcloud auth login
-        $activeUser = & gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>$null
-        if (-not $activeUser -or $activeUser -match "compute@developer\\.gserviceaccount\\.com") {
-            Write-ColoredMessage "A conta ativa ainda não é humana! Repita o login." -Type Error
-            throw "Conta inválida ou sem permissão."
+        Write-ColoredMessage "Use uma conta humana do GCP com permissões adequadas." -Type Info
+        
+        Invoke-WithRetry -ActionDescription "Autenticação Google Cloud" -ScriptBlock {
+            & gcloud auth login
+            
+            $newActiveUser = & gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>$null
+            if (-not $newActiveUser -or $newActiveUser -match "compute@developer\.gserviceaccount\.com") {
+                throw "Falha na autenticação ou conta inválida"
+            }
+            
+            Write-ColoredMessage "Autenticado como: $newActiveUser" -Type Success
         }
-        Write-ColoredMessage "Conta autenticada: $activeUser" -Type Success
     } else {
-        Write-ColoredMessage "Conta ativa: $activeUser" -Type Success
+        Write-ColoredMessage "Já autenticado como: $activeUser" -Type Success
+    }
+    
+    # Configurar projeto
+    Write-ColoredMessage "Configurando projeto: $ProjetoGCP" -Type Info
+    & gcloud config set project $ProjetoGCP | Out-Null
+}
+
+function Test-PortAvailable {
+    param([int]$Port)
+    
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $Port)
+        $listener.Start()
+        $listener.Stop()
+        return $true
+    } catch {
+        return $false
     }
 }
 
-function Initialize-GCloudProject {
-    Write-ColoredMessage "Definindo projeto GCP - $ProjetoGCP" -Type Info
-    & gcloud config set project $ProjetoGCP
-    Write-ColoredMessage "Projeto GCP definido" -Type Success
+function Get-NextAvailablePort {
+    param([int]$StartPort = 5432)
+    
+    $currentPort = $StartPort
+    $maxAttempts = 100
+    $attempts = 0
+    
+    while ($attempts -lt $maxAttempts) {
+        if (Test-PortAvailable -Port $currentPort) {
+            return $currentPort
+        }
+        
+        Write-ColoredMessage "Porta $currentPort ocupada, tentando próxima..." -Type Warning
+        $currentPort++
+        $attempts++
+    }
+    
+    throw "Não foi possível encontrar uma porta disponível após $maxAttempts tentativas"
 }
 
 function Start-CloudSQLProxy {
-    Write-ColoredMessage "Iniciando Cloud SQL Proxy para instância - $InstanciaGCP" -Type Info
-    Write-ColoredMessage "Proxy executável - $($Paths.ProxyFinal)" -Type Info
-    Write-ColoredMessage "Porta padrão - 5432 (PostgreSQL)" -Type Info
-    Write-ColoredMessage "Pressione Ctrl+C para interromper o proxy" -Type Warning
-    & $Paths.ProxyFinal $InstanciaGCP --gcloud-auth
+    Write-ColoredMessage "Procurando porta disponível..." -Type Info
+    
+    try {
+        $porta = Get-NextAvailablePort -StartPort 5432
+        Write-ColoredMessage "Porta disponível encontrada: $porta" -Type Success
+    } catch {
+        Write-ColoredMessage "Erro ao encontrar porta disponível: $($_.Exception.Message)" -Type Error
+        throw
+    }
+    
+    Write-ColoredMessage "Iniciando Cloud SQL Proxy na porta $porta..." -Type Info
+    Write-ColoredMessage "Conectando à instância: $InstanciaGCP" -Type Info
+    
+    Write-Host ""
+    Write-Host "=== CONEXÃO ESTABELECIDA ===" -ForegroundColor Green
+    Write-Host "Host:     127.0.0.1" -ForegroundColor White
+    Write-Host "Porta:    $porta" -ForegroundColor White
+    Write-Host "Banco:    <seu_banco>" -ForegroundColor White
+    Write-Host "Usuário:  <seu_usuario>" -ForegroundColor White
+    Write-Host "Senha:    <sua_senha>" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Comando psql: psql -h 127.0.0.1 -p $porta -U usuario -d banco" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Pressione Ctrl+C para interromper" -ForegroundColor Red
+    Write-Host "=================================" -ForegroundColor Green
+    Write-Host ""
+    
+    # Loop de reconexão
+    while ($true) {
+        try {
+            & $Paths.ProxyFinal $InstanciaGCP --gcloud-auth --port $porta --address 127.0.0.1
+        } catch {
+            Write-ColoredMessage "Conexão perdida. Reconectando em 5 segundos..." -Type Warning
+            Start-Sleep -Seconds 5
+        }
+    }
 }
 
-function Test-Prerequisites {
+# Execução principal
+try {
     Write-ColoredMessage "Verificando pré-requisitos..." -Type Info
-    if ($PSVersionTable.PSVersion.Major -lt 5) {
-        throw "PowerShell 5.1 ou superior é necessário. Versão atual - $($PSVersionTable.PSVersion)"
-    }
-    if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
-        throw "Este script foi desenvolvido para Windows. SO atual - $($PSVersionTable.Platform)"
-    }
-    try {
-        $null = Invoke-WebRequest -Uri "https://google.com" -UseBasicParsing -TimeoutSec 5
-    } catch {
-        throw "Sem conectividade com a internet. Verifique sua conexão."
-    }
+    
+    Install-GCloudSDK
+    Install-CloudSQLProxy
+    
     Write-ColoredMessage "Pré-requisitos verificados com sucesso" -Type Success
-}
-
-function Main {
-    try {
-        Test-Prerequisites
-        Invoke-WithRetry { Install-GCloudSDK } "Instalação do Google Cloud SDK"
-        Invoke-WithRetry { Install-CloudSQLProxy } "Instalação do Cloud SQL Proxy"
-        Ensure-HumanAuth
-        Initialize-GCloudProject
-        Start-CloudSQLProxy
-        Write-ColoredMessage "Script concluído com sucesso." -Type Success
-    } catch {
-        Write-ColoredMessage "Erro fatal - $($_.Exception.Message)" -Type Error
-        exit 1
-    }
-}
-
-if ($MyInvocation.InvocationName -ne '.') {
-    Main
+    
+    Ensure-HumanAuth
+    Start-CloudSQLProxy
+    
+} catch {
+    Write-ColoredMessage "Erro fatal - $($_.Exception.Message)" -Type Error
+    exit 1
 }
