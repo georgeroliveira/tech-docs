@@ -1,157 +1,251 @@
 #!/bin/bash
-
-# ===========================================================
-# Autor:      George Rodrigues de Oliveira
-# GitHub:     https://github.com/georgeroliveira
-# Licença:    MIT
-# Versão:     2.1 (Multiplataforma + Autocontida)
-# Data:       2025-07-30
-# Descrição:  Conexão ao Cloud SQL com autenticação humana
-# ===========================================================
+# cloudsql_proxy.sh
+# Script oficial de georgeroliveira
+# github.com/georgeroliveira | MIT License
+# Versão: 2.8 | Data: 2025-07-30
+# Compatível: macOS, Ubuntu 20.04/22.04/24.04 (x86_64)
+# Descrição: Conexão segura ao Cloud SQL (PostgreSQL) com autenticação humana, validação e deploy do Proxy.
+# Dependências: curl, lsof, bash, gcloud, brew (macOS)
 
 set -euo pipefail
 
-# === CONFIGURAÇÕES PADRÃO ===
-PROJETO_GCP="${1:-plataformagovdigital-gcp-main}"
-INSTANCIA_GCP="${2:-plataformagovdigital-gcp-main:southamerica-east1:cluster-postgresql-dev}"
-PROXY_VERSION="${3:-v2.16.0}"
-
-# Diretório onde o script está localizado
+PROJETO_GCP=""
+INSTANCIA_GCP=""
+PORTA_LOCAL="5432"
+PROXY_VERSION="v2.16.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROXY_DIR="$SCRIPT_DIR"
-PROXY_PATH="$PROXY_DIR/cloud-sql-proxy"
+PROXY_PATH="$SCRIPT_DIR/cloud-sql-proxy"
+PLATFORM=""
+TEMP_DIR=""
 
-# === DETECTAR PLATAFORMA ===
-OS=$(uname)
-case "$OS" in
-    Darwin)
-        PLATFORM="macOS"
-        PROXY_URL="https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${PROXY_VERSION}/cloud-sql-proxy.darwin.amd64"
-        ;;
-    Linux)
-        PLATFORM="Linux"
-        PROXY_URL="https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
-        ;;
-    *)
-        echo "[ERRO] Sistema operacional não suportado: $OS"
-        exit 1
-        ;;
-esac
-
-# === CORES ===
-function log() {
-    local type="$1"; shift
-    local color=""
-    case "$type" in
-        INFO) color="\033[1;36m";;
-        SUCCESS) color="\033[1;32m";;
-        WARNING) color="\033[1;33m";;
-        ERROR) color="\033[1;31m";;
+log() {
+    local tipo="$1"
+    shift
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local cor
+    case "$tipo" in
+        INFO)  cor="\033[1;34m";;
+        OK)    cor="\033[1;32m";;
+        WARN)  cor="\033[1;33m";;
+        ERRO)  cor="\033[1;31m";;
+        *)     cor="";;
     esac
-    echo -e "${color}[$type] $* \033[0m"
+    echo -e "${cor}[$timestamp][$tipo]\033[0m $*" >&2
 }
 
-# === PRÉ-REQUISITOS ===
-function check_prerequisites() {
-    log INFO "Verificando pré-requisitos..."
-    for cmd in curl unzip bash; do
-        if ! command -v $cmd &>/dev/null; then
-            log ERROR "Comando '$cmd' não encontrado."
+show_about() {
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Script oficial de georgeroliveira"
+    echo "  GitHub: github.com/georgeroliveira"
+    echo "  Licença: MIT | Versão 2.8 | 2025-07-30"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+[[ "${1:-}" == "--about" || "${1:-}" == "--version" ]] && { show_about; exit 0; }
+
+cleanup() {
+    [[ -d "${TEMP_DIR:-}" ]] && rm -rf "$TEMP_DIR"
+}
+trap cleanup EXIT
+
+detect_platform() {
+    case "$(uname)" in
+        Darwin)
+            PLATFORM="macOS"
+            PROXY_URL="https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${PROXY_VERSION}/cloud-sql-proxy.darwin.amd64"
+            ;;
+        Linux)
+            PLATFORM="Linux"
+            PROXY_URL="https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
+            ;;
+        *)
+            log ERRO "Sistema operacional não suportado"
             exit 1
+            ;;
+    esac
+    log OK "Plataforma detectada: $PLATFORM"
+}
+
+check_dependencies() {
+    local deps=("curl" "lsof" "bash")
+    local missing=()
+
+    log INFO "Verificando dependências essenciais..."
+
+    for cmd in "${deps[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
         fi
     done
-    log SUCCESS "Pré-requisitos verificados com sucesso."
-}
 
-# === INSTALAR GOOGLE CLOUD SDK ===
-function install_gcloud_sdk() {
-    if command -v gcloud &>/dev/null; then
-        log SUCCESS "Google Cloud SDK já está instalado."
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+        log OK "Todas as dependências estão instaladas"
         return
     fi
 
-    log INFO "Instalando Google Cloud SDK..."
+    log WARN "Dependências ausentes: ${missing[*]}"
 
     if [[ "$PLATFORM" == "macOS" ]]; then
-        brew install --cask google-cloud-sdk || {
-            log ERROR "Falha ao instalar via Homebrew."
-            exit 1
-        }
-    elif [[ "$PLATFORM" == "Linux" ]]; then
-        sudo apt update && sudo apt install -y apt-transport-https ca-certificates gnupg curl
-        echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" \
-          | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
-        curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-          | gpg --dearmor | sudo tee /usr/share/keyrings/cloud.google.gpg >/dev/null
-        sudo apt update && sudo apt install -y google-cloud-sdk
-    fi
-}
-
-# === LOGIN HUMANO ===
-function ensure_human_auth() {
-    local active_user
-    active_user="$(gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null || true)"
-    if [[ -z "$active_user" || "$active_user" == *"compute@"* ]]; then
-        log WARNING "Login necessário. Será aberto o navegador para autenticação."
-        gcloud auth login
-        active_user="$(gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null || true)"
-        if [[ -z "$active_user" || "$active_user" == *"compute@"* ]]; then
-            log ERROR "A conta ativa ainda não é humana. Repita o login."
+        if ! command -v brew &>/dev/null; then
+            log ERRO "Homebrew não está instalado. Instale com:"
+            echo '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
             exit 1
         fi
+
+        for pkg in "${missing[@]}"; do
+            read -rp "Deseja instalar '$pkg' com brew? (s/N): " resp
+            if [[ "$resp" =~ ^[sS]$ ]]; then
+                brew install "$pkg" || {
+                    log ERRO "Falha ao instalar '$pkg' via brew"
+                    exit 1
+                }
+            else
+                log ERRO "Instalação cancelada. Dependência '$pkg' não encontrada."
+                exit 1
+            fi
+        done
+
+    elif [[ "$PLATFORM" == "Linux" ]]; then
+        if ! command -v sudo &>/dev/null; then
+            log ERRO "'sudo' é necessário para instalar pacotes no Linux."
+            exit 1
+        fi
+
+        for pkg in "${missing[@]}"; do
+            read -rp "Deseja instalar '$pkg' com apt? (s/N): " resp
+            if [[ "$resp" =~ ^[sS]$ ]]; then
+                sudo apt install -y "$pkg" || {
+                    log ERRO "Falha ao instalar '$pkg'"
+                    exit 1
+                }
+            else
+                log ERRO "Instalação cancelada. Dependência '$pkg' não encontrada."
+                exit 1
+            fi
+        done
+    else
+        log ERRO "Plataforma não suportada para instalação automática"
+        exit 1
     fi
-    log SUCCESS "Conta autenticada: $active_user"
+
+    log OK "Todas as dependências foram instaladas com sucesso"
 }
 
-# === DEFINIR PROJETO ===
-function set_project() {
-    log INFO "Verificando se a conta tem acesso ao projeto: $PROJETO_GCP"
+install_gcloud_sdk() {
+    if command -v gcloud &>/dev/null; then
+        log OK "Google Cloud SDK já instalado"
+        return
+    fi
+
+    log ERRO "Google Cloud SDK não encontrado. Instale manualmente seguindo a documentação oficial:"
+    echo "https://cloud.google.com/sdk/docs/install"
+    exit 1
+}
+
+definir_projeto() {
+    echo
+    read -rp "Digite o nome do projeto GCP (ex: govinfra-dev-001): " PROJETO_GCP
+    if [[ -z "$PROJETO_GCP" ]]; then
+        log ERRO "Projeto não informado"
+        exit 1
+    fi
+}
+
+set_project() {
     if ! gcloud projects describe "$PROJETO_GCP" &>/dev/null; then
-        log ERROR "A conta não tem acesso ao projeto '$PROJETO_GCP'"
-        echo -e "Use: gcloud projects list para ver os projetos disponíveis."
+        log ERRO "Projeto '$PROJETO_GCP' não encontrado ou sem acesso"
         exit 1
     fi
     gcloud config set project "$PROJETO_GCP" &>/dev/null
-    log SUCCESS "Projeto GCP definido: $PROJETO_GCP"
+    log OK "Projeto GCP definido: $PROJETO_GCP"
 }
 
-# === INSTALAR PROXY ===
-function install_proxy() {
-    mkdir -p "$PROXY_DIR"
-
-    if [[ -x "$PROXY_PATH" ]]; then
-        version_installed="$("$PROXY_PATH" --version 2>/dev/null || true)"
-        if [[ -n "$version_installed" ]]; then
-            log SUCCESS "Cloud SQL Proxy já instalado em: $PROXY_PATH"
-            echo -e "Versão instalada: $version_installed"
-            return
-        else
-            log WARNING "Proxy inválido. Reinstalando..."
-            rm -f "$PROXY_PATH"
-        fi
+ensure_human_auth() {
+    local active_user
+    active_user="$(gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null || true)"
+    if [[ -z "$active_user" || "$active_user" == *"compute@"* ]]; then
+        log WARN "Login humano necessário. Abrindo navegador..."
+        gcloud auth login
+        active_user="$(gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null || true)"
+        [[ -z "$active_user" || "$active_user" == *"compute@"* ]] && {
+            log ERRO "Conta humana não autenticada. Abortando."
+            exit 1
+        }
     fi
+    log OK "Conta autenticada: $active_user"
+}
 
-    log INFO "Baixando Cloud SQL Proxy: $PROXY_URL"
+escolher_instancia() {
+    echo
+    echo "[INFO] Digite a string completa da instância do Cloud SQL no formato:"
+    echo "       projeto:regiao:instancia"
+    read -rp "Instância Cloud SQL: " INSTANCIA_GCP
+
+    if [[ ! "$INSTANCIA_GCP" =~ ^[a-zA-Z0-9\-]+:[a-z0-9\-]+:[a-zA-Z0-9\-]+$ ]]; then
+        log ERRO "Formato inválido. Exemplo: meu-projeto:southamerica-east1:pg-instance"
+        exit 1
+    fi
+    log OK "Instância informada: $INSTANCIA_GCP"
+}
+
+verificar_porta() {
+    if lsof -i TCP:$PORTA_LOCAL &>/dev/null; then
+        log WARN "A porta $PORTA_LOCAL já está em uso."
+        lsof -i TCP:$PORTA_LOCAL | head -n 2
+        read -rp "Deseja usar outra porta? (s/N): " resp
+        [[ "$resp" =~ ^[sS]$ ]] && read -rp "Digite a nova porta: " PORTA_LOCAL || {
+            log ERRO "Porta em uso. Abortando."
+            exit 1
+        }
+    fi
+}
+
+install_proxy() {
+    mkdir -p "$SCRIPT_DIR"
+    if [[ -x "$PROXY_PATH" ]]; then
+        log OK "Cloud SQL Proxy já instalado: $PROXY_PATH"
+        "$PROXY_PATH" --version
+        return
+    fi
+    log INFO "Baixando Cloud SQL Proxy..."
     curl -Lo "$PROXY_PATH" "$PROXY_URL"
     chmod +x "$PROXY_PATH"
-    log SUCCESS "Cloud SQL Proxy instalado com sucesso."
+    log OK "Proxy instalado: $PROXY_PATH"
     "$PROXY_PATH" --version
 }
 
-# === INICIAR PROXY ===
-function start_proxy() {
-    log INFO "Iniciando Cloud SQL Proxy para instância: $INSTANCIA_GCP"
-    log INFO "Executável: $PROXY_PATH"
-    log WARNING "Pressione Ctrl+C para encerrar o proxy."
-    "$PROXY_PATH" "$INSTANCIA_GCP" --gcloud-auth
+start_proxy() {
+    log INFO "Iniciando o Cloud SQL Proxy em 127.0.0.1:$PORTA_LOCAL..."
+    "$PROXY_PATH" "$INSTANCIA_GCP" --gcloud-auth --address 127.0.0.1 --port "$PORTA_LOCAL" &
+    sleep 2
+    show_connection_info
+    wait
 }
 
-# === EXECUÇÃO PRINCIPAL ===
-function main() {
-    check_prerequisites
+show_connection_info() {
+    log OK "Conexão ativa com o banco de dados."
+    echo
+    echo "Host:     127.0.0.1"
+    echo "Porta:    $PORTA_LOCAL"
+    echo "Banco:    <nome_banco>"
+    echo "Usuário:  <usuario>"
+    echo "Senha:    <senha>"
+    echo
+    log INFO "Use PgAdmin, DBeaver, TablePlus ou terminal:"
+    echo "psql -h 127.0.0.1 -U usuario -d nome_banco"
+}
+
+main() {
+    show_about
+    detect_platform
+    check_dependencies
     install_gcloud_sdk
     ensure_human_auth
+    definir_projeto
     set_project
+    escolher_instancia
+    verificar_porta
     install_proxy
     start_proxy
 }
