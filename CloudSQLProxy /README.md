@@ -193,9 +193,3 @@ git clone https://github.com/seu-usuario/cloudsql-proxy-automation.git
 
 Este projeto está licenciado sob a Licença MIT. Consulte o arquivo `LICENSE` para mais informações.
 
-```
-
----
-
-Deseja que eu salve este conteúdo como um novo `README.md` para commit direto no seu repositório? Posso gerar o arquivo agora mesmo.
-```
