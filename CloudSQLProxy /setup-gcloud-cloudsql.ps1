@@ -1,253 +1,238 @@
-#!/bin/bash
-# cloudsql_proxy.sh
-# Script oficial de georgeroliveira
-# github.com/georgeroliveira | MIT License
-# Versão: 2.8 | Data: 2025-07-30
-# Compatível: macOS, Ubuntu 20.04/22.04/24.04 (x86_64)
-# Descrição: Conexão segura ao Cloud SQL (PostgreSQL) com autenticação humana, validação e deploy do Proxy.
-# Dependências: curl, lsof, bash, gcloud, brew (macOS)
+#Requires -Version 5.1
 
-set -euo pipefail
+<#
+===========================================================
+ Autor:      George Rodrigues de Oliveira
+ GitHub:     https://github.com/georgeroliveira
+ Licença:    MIT
+ Versão:     1.0
+ Data:       2025-07-27
+ Descrição:  Conexão ao Cloud SQL com autenticação humana
+===========================================================
+#>
 
-PROJETO_GCP=""
-INSTANCIA_GCP=""
-PORTA_LOCAL="5432"
-PROXY_VERSION="v2.16.0"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROXY_PATH="$SCRIPT_DIR/cloud-sql-proxy"
-PLATFORM=""
-TEMP_DIR=""
+<#
+.SYNOPSIS
+    Script para conectar ao Cloud SQL via Proxy em Windows com login de usuário humano.
 
-log() {
-    local tipo="$1"
-    shift
-    local timestamp
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    local cor
-    case "$tipo" in
-        INFO)  cor="\033[1;34m";;
-        OK)    cor="\033[1;32m";;
-        WARN)  cor="\033[1;33m";;
-        ERRO)  cor="\033[1;31m";;
-        *)     cor="";;
-    esac
-    echo -e "${cor}[$timestamp][$tipo]\033[0m $*" >&2
+.DESCRIPTION
+    Instala/atualiza Google Cloud SDK e Cloud SQL Proxy, força login de usuário humano
+    somente se necessário, e conecta à instância PostgreSQL do Google Cloud Platform.
+
+.EXAMPLE
+    .\CloudSQLProxy.ps1
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $false)]
+    [string]$ProjetoGCP = "plataformagovdigital-gcp-main",
+
+    [Parameter(Mandatory = $false)]
+    [string]$InstanciaGCP = "plataformagovdigital-gcp-main:southamerica-east1:cluster-postgresql-dev",
+
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^v\d+\.\d+\.\d+$')]
+    [string]$ProxyVersion = "v2.16.0",
+
+    [Parameter(Mandatory = $false)]
+    [string]$ProxyDir = (Join-Path $env:USERPROFILE "Documents"),
+
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipGCloudInstall
+)
+
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+
+try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch {}
+
+$Config = @{
+    ProxyFileName = "cloud-sql-proxy.exe"
+    ProxyTempName = "cloud-sql-proxy.x64.exe"
+    ProxyBaseUrl = "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy"
+    GCloudInstallerUrl = "https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe"
+    MaxRetries = 3
+    RetryDelaySeconds = 5
 }
 
-show_about() {
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Script oficial de georgeroliveira"
-    echo "  GitHub: github.com/georgeroliveira"
-    echo "  Licença: MIT | Versão 2.8 | 2025-07-30"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+$Paths = @{
+    ProxyFinal = Join-Path $ProxyDir $Config.ProxyFileName
+    ProxyTemp = Join-Path $ProxyDir $Config.ProxyTempName
+    ProxyUrl = "$($Config.ProxyBaseUrl)/$ProxyVersion/$($Config.ProxyTempName)"
+    GCloudInstaller = Join-Path $env:TEMP "GoogleCloudSDKInstaller.exe"
 }
 
-[[ "${1:-}" == "--about" || "${1:-}" == "--version" ]] && { show_about; exit 0; }
-
-cleanup() {
-    [[ -d "${TEMP_DIR:-}" ]] && rm -rf "$TEMP_DIR"
-}
-trap cleanup EXIT
-
-detect_platform() {
-    case "$(uname)" in
-        Darwin)
-            PLATFORM="macOS"
-            PROXY_URL="https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${PROXY_VERSION}/cloud-sql-proxy.darwin.amd64"
-            ;;
-        Linux)
-            PLATFORM="Linux"
-            PROXY_URL="https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
-            ;;
-        *)
-            log ERRO "Sistema operacional não suportado"
-            exit 1
-            ;;
-    esac
-    log OK "Plataforma detectada: $PLATFORM"
+function Write-ColoredMessage {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [Parameter(Mandatory = $false)][ValidateSet("Info", "Success", "Warning", "Error")][string]$Type = "Info"
+    )
+    $colorMap = @{ Info = "Cyan"; Success = "Green"; Warning = "Yellow"; Error = "Red" }
+    $prefix = "[$($Type.ToUpper())]"
+    Write-Host "$prefix $Message" -ForegroundColor $colorMap[$Type]
 }
 
-check_dependencies() {
-    local deps=("curl" "lsof" "bash")
-    local missing=()
-
-    log INFO "Verificando dependências essenciais..."
-
-    for cmd in "${deps[@]}"; do
-        if ! command -v "$cmd" &>/dev/null; then
-            missing+=("$cmd")
-        fi
-    done
-
-    if [[ "${#missing[@]}" -eq 0 ]]; then
-        log OK "Todas as dependências estão instaladas"
-        return
-    fi
-
-    log WARN "Dependências ausentes: ${missing[*]}"
-
-    if [[ "$PLATFORM" == "macOS" ]]; then
-        if ! command -v brew &>/dev/null; then
-            log ERRO "Homebrew não está instalado. Instale com:"
-            echo '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-            exit 1
-        fi
-
-        for pkg in "${missing[@]}"; do
-            read -rp "Deseja instalar '$pkg' com brew? (s/N): " resp
-            if [[ "$resp" =~ ^[sS]$ ]]; then
-                brew install "$pkg" || {
-                    log ERRO "Falha ao instalar '$pkg' via brew"
-                    exit 1
-                }
-            else
-                log ERRO "Instalação cancelada. Dependência '$pkg' não encontrada."
-                exit 1
-            fi
-        done
-
-    elif [[ "$PLATFORM" == "Linux" ]]; then
-        if ! command -v sudo &>/dev/null; then
-            log ERRO "'sudo' é necessário para instalar pacotes no Linux."
-            exit 1
-        fi
-
-        for pkg in "${missing[@]}"; do
-            read -rp "Deseja instalar '$pkg' com apt? (s/N): " resp
-            if [[ "$resp" =~ ^[sS]$ ]]; then
-                sudo apt install -y "$pkg" || {
-                    log ERRO "Falha ao instalar '$pkg'"
-                    exit 1
-                }
-            else
-                log ERRO "Instalação cancelada. Dependência '$pkg' não encontrada."
-                exit 1
-            fi
-        done
-    else
-        log ERRO "Plataforma não suportada para instalação automática"
-        exit 1
-    fi
-
-    log OK "Todas as dependências foram instaladas com sucesso"
+function Test-CommandExists {
+    param([Parameter(Mandatory = $true)][string]$CommandName)
+    try { $null = Get-Command $CommandName -ErrorAction Stop; return $true }
+    catch { return $false }
 }
 
-install_gcloud_sdk() {
-    if command -v gcloud &>/dev/null; then
-        log OK "Google Cloud SDK já instalado"
-        return
-    fi
-
-    log ERRO "Google Cloud SDK não encontrado. Instale manualmente seguindo a documentação oficial:"
-    echo "https://cloud.google.com/sdk/docs/install"
-    exit 1
-}
-
-definir_projeto() {
-    echo
-    read -rp "Digite o nome do projeto GCP (ex: govinfra-dev-001): " PROJETO_GCP
-    if [[ -z "$PROJETO_GCP" ]]; then
-        log ERRO "Projeto não informado"
-        exit 1
-    fi
-}
-
-set_project() {
-    if ! gcloud projects describe "$PROJETO_GCP" &>/dev/null; then
-        log ERRO "Projeto '$PROJETO_GCP' não encontrado ou sem acesso"
-        exit 1
-    fi
-    gcloud config set project "$PROJETO_GCP" &>/dev/null
-    log OK "Projeto GCP definido: $PROJETO_GCP"
-}
-
-ensure_human_auth() {
-    local active_user
-    active_user="$(gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null || true)"
-    if [[ -z "$active_user" || "$active_user" == *"compute@"* ]]; then
-        log WARN "Login humano necessário. Abrindo navegador..."
-        gcloud auth login
-        active_user="$(gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null || true)"
-        [[ -z "$active_user" || "$active_user" == *"compute@"* ]] && {
-            log ERRO "Conta humana não autenticada. Abortando."
-            exit 1
+function Invoke-WithRetry {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock,
+        [Parameter(Mandatory = $false)][int]$MaxRetries = $Config.MaxRetries,
+        [Parameter(Mandatory = $false)][int]$DelaySeconds = $Config.RetryDelaySeconds,
+        [Parameter(Mandatory = $false)][string]$ActionDescription = "Operação"
+    )
+    for ($i = 1; $i -le $MaxRetries; $i++) {
+        try {
+            Write-ColoredMessage "Tentativa $i de $MaxRetries - $ActionDescription" -Type Info
+            & $ScriptBlock
+            return
+        } catch {
+            Write-ColoredMessage "Tentativa $i falhou - $($_.Exception.Message)" -Type Warning
+            if ($i -eq $MaxRetries) {
+                Write-ColoredMessage "Todas as tentativas falharam para - $ActionDescription" -Type Error
+                throw $_
+            }
+            Write-ColoredMessage "Aguardando $DelaySeconds segundos antes da próxima tentativa..." -Type Info
+            Start-Sleep -Seconds $DelaySeconds
         }
-    fi
-    log OK "Conta autenticada: $active_user"
+    }
 }
 
-escolher_instancia() {
-    echo
-    echo "[INFO] Digite a string completa da instância do Cloud SQL no formato:"
-    echo "       projeto:regiao:instancia"
-    read -rp "Instância Cloud SQL: " INSTANCIA_GCP
-
-    if [[ ! "$INSTANCIA_GCP" =~ ^[a-zA-Z0-9\-]+:[a-z0-9\-]+:[a-zA-Z0-9\-]+$ ]]; then
-        log ERRO "Formato inválido. Exemplo: meu-projeto:southamerica-east1:pg-instance"
-        exit 1
-    fi
-    log OK "Instância informada: $INSTANCIA_GCP"
-}
-
-verificar_porta() {
-    if lsof -i TCP:$PORTA_LOCAL &>/dev/null; then
-        log WARN "A porta $PORTA_LOCAL já está em uso."
-        lsof -i TCP:$PORTA_LOCAL | head -n 2
-        read -rp "Deseja usar outra porta? (s/N): " resp
-        [[ "$resp" =~ ^[sS]$ ]] && read -rp "Digite a nova porta: " PORTA_LOCAL || {
-            log ERRO "Porta em uso. Abortando."
-            exit 1
-        }
-    fi
-}
-
-install_proxy() {
-    mkdir -p "$SCRIPT_DIR"
-    if [[ -x "$PROXY_PATH" ]]; then
-        log OK "Cloud SQL Proxy já instalado: $PROXY_PATH"
-        "$PROXY_PATH" --version
+function Install-GCloudSDK {
+    if (Test-CommandExists "gcloud") {
+        Write-ColoredMessage "Google Cloud SDK já está instalado" -Type Success
         return
-    fi
-    log INFO "Baixando Cloud SQL Proxy..."
-    curl -Lo "$PROXY_PATH" "$PROXY_URL"
-    chmod +x "$PROXY_PATH"
-    log OK "Proxy instalado: $PROXY_PATH"
-    "$PROXY_PATH" --version
+    }
+    if ($SkipGCloudInstall) {
+        Write-ColoredMessage "Instalação do gcloud foi pulada conforme solicitado" -Type Warning
+        throw "Google Cloud SDK não encontrado e instalação foi pulada"
+    }
+    Write-ColoredMessage "Google Cloud SDK não encontrado. Iniciando instalação..." -Type Info
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $Config.GCloudInstallerUrl -OutFile $Paths.GCloudInstaller -UseBasicParsing -ErrorAction Stop
+        $process = Start-Process -FilePath $Paths.GCloudInstaller -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            throw "Instalador falhou com código de saída - $($process.ExitCode)"
+        }
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+    } catch {
+        Write-ColoredMessage "Erro ao instalar Google Cloud SDK - $($_.Exception.Message)" -Type Error
+        throw
+    } finally {
+        if (Test-Path $Paths.GCloudInstaller) {
+            try { Remove-Item $Paths.GCloudInstaller -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
 }
 
-start_proxy() {
-    log INFO "Iniciando o Cloud SQL Proxy em 127.0.0.1:$PORTA_LOCAL..."
-    "$PROXY_PATH" "$INSTANCIA_GCP" --gcloud-auth --address 127.0.0.1 --port "$PORTA_LOCAL" &
-    sleep 2
-    show_connection_info
-    wait
+function Install-CloudSQLProxy {
+    if (Test-Path $Paths.ProxyFinal) {
+        try {
+            $versionOutput = & $Paths.ProxyFinal --version 2>&1
+            Write-ColoredMessage "Cloud SQL Proxy já existe e está funcional - $($Paths.ProxyFinal)" -Type Success
+            Write-ColoredMessage "Versão instalada - $versionOutput" -Type Info
+            return
+        } catch {
+            Write-ColoredMessage "Proxy existe mas não é executável. Fazendo re-download..." -Type Warning
+            try { Remove-Item $Paths.ProxyFinal -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+    Write-ColoredMessage "Instalando Cloud SQL Proxy versão $ProxyVersion..." -Type Info
+    try {
+        if (-not (Test-Path $ProxyDir)) {
+            New-Item -Path $ProxyDir -ItemType Directory -Force | Out-Null
+        }
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $webClient = New-Object System.Net.WebClient
+        $webClient.Headers.Add("User-Agent", "PowerShell CloudSQL Script")
+        try {
+            $webClient.DownloadFile($Paths.ProxyUrl, $Paths.ProxyTemp)
+        } finally { $webClient.Dispose() }
+        if (-not (Test-Path $Paths.ProxyTemp)) { throw "Falha no download do proxy" }
+        $fileInfo = Get-Item $Paths.ProxyTemp
+        if ($fileInfo.Length -eq 0) { throw "Arquivo baixado está vazio" }
+        Move-Item -Path $Paths.ProxyTemp -Destination $Paths.ProxyFinal -Force
+        $versionOutput = & $Paths.ProxyFinal --version 2>&1
+        Write-ColoredMessage "Cloud SQL Proxy instalado com sucesso - $($Paths.ProxyFinal)" -Type Success
+        Write-ColoredMessage "Versão - $versionOutput" -Type Info
+    } catch {
+        Write-ColoredMessage "Erro ao instalar Cloud SQL Proxy - $($_.Exception.Message)" -Type Error
+        @($Paths.ProxyTemp, $Paths.ProxyFinal) | ForEach-Object {
+            if (Test-Path $_) { try { Remove-Item $_ -Force -ErrorAction SilentlyContinue } catch {} }
+        }
+        throw
+    }
 }
 
-show_connection_info() {
-    log OK "Conexão ativa com o banco de dados."
-    echo
-    echo "Host:     127.0.0.1"
-    echo "Porta:    $PORTA_LOCAL"
-    echo "Banco:    <nome_banco>"
-    echo "Usuário:  <usuario>"
-    echo "Senha:    <senha>"
-    echo
-    log INFO "Use PgAdmin, DBeaver, TablePlus ou terminal:"
-    echo "psql -h 127.0.0.1 -U usuario -d nome_banco"
+function Ensure-HumanAuth {
+    $activeUser = & gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>$null
+    if (-not $activeUser -or $activeUser -match "compute@developer\\.gserviceaccount\\.com") {
+        Write-ColoredMessage "Login necessário! Será aberto o navegador para autenticação Google." -Type Warning
+        Write-ColoredMessage "Use uma conta humana do GCP com permissão no projeto: $ProjetoGCP" -Type Info
+        Read-Host "Pressione Enter para abrir o navegador e fazer login"
+        & gcloud auth login
+        $activeUser = & gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>$null
+        if (-not $activeUser -or $activeUser -match "compute@developer\\.gserviceaccount\\.com") {
+            Write-ColoredMessage "A conta ativa ainda não é humana! Repita o login." -Type Error
+            throw "Conta inválida ou sem permissão."
+        }
+        Write-ColoredMessage "Conta autenticada: $activeUser" -Type Success
+    } else {
+        Write-ColoredMessage "Conta ativa: $activeUser" -Type Success
+    }
 }
 
-main() {
-    show_about
-    detect_platform
-    check_dependencies
-    install_gcloud_sdk
-    ensure_human_auth
-    definir_projeto
-    set_project
-    escolher_instancia
-    verificar_porta
-    install_proxy
-    start_proxy
+function Initialize-GCloudProject {
+    Write-ColoredMessage "Definindo projeto GCP - $ProjetoGCP" -Type Info
+    & gcloud config set project $ProjetoGCP
+    Write-ColoredMessage "Projeto GCP definido" -Type Success
 }
 
-main "$@"
+function Start-CloudSQLProxy {
+    Write-ColoredMessage "Iniciando Cloud SQL Proxy para instância - $InstanciaGCP" -Type Info
+    Write-ColoredMessage "Proxy executável - $($Paths.ProxyFinal)" -Type Info
+    Write-ColoredMessage "Porta padrão - 5432 (PostgreSQL)" -Type Info
+    Write-ColoredMessage "Pressione Ctrl+C para interromper o proxy" -Type Warning
+    & $Paths.ProxyFinal $InstanciaGCP --gcloud-auth
+}
+
+function Test-Prerequisites {
+    Write-ColoredMessage "Verificando pré-requisitos..." -Type Info
+    if ($PSVersionTable.PSVersion.Major -lt 5) {
+        throw "PowerShell 5.1 ou superior é necessário. Versão atual - $($PSVersionTable.PSVersion)"
+    }
+    if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+        throw "Este script foi desenvolvido para Windows. SO atual - $($PSVersionTable.Platform)"
+    }
+    try {
+        $null = Invoke-WebRequest -Uri "https://google.com" -UseBasicParsing -TimeoutSec 5
+    } catch {
+        throw "Sem conectividade com a internet. Verifique sua conexão."
+    }
+    Write-ColoredMessage "Pré-requisitos verificados com sucesso" -Type Success
+}
+
+function Main {
+    try {
+        Test-Prerequisites
+        Invoke-WithRetry { Install-GCloudSDK } "Instalação do Google Cloud SDK"
+        Invoke-WithRetry { Install-CloudSQLProxy } "Instalação do Cloud SQL Proxy"
+        Ensure-HumanAuth
+        Initialize-GCloudProject
+        Start-CloudSQLProxy
+        Write-ColoredMessage "Script concluído com sucesso." -Type Success
+    } catch {
+        Write-ColoredMessage "Erro fatal - $($_.Exception.Message)" -Type Error
+        exit 1
+    }
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    Main
+}
