@@ -191,13 +191,12 @@ escolher_instancia() {
 
 verificar_porta() {
     if lsof -i TCP:$PORTA_LOCAL &>/dev/null; then
-        log WARN "A porta $PORTA_LOCAL já está em uso."
+        log WARN "A porta padrão $PORTA_LOCAL já está em uso."
         lsof -i TCP:$PORTA_LOCAL | head -n 2
-        read -rp "Deseja usar outra porta? (s/N): " resp
-        [[ "$resp" =~ ^[sS]$ ]] && read -rp "Digite a nova porta: " PORTA_LOCAL || {
-            log ERRO "Porta em uso. Abortando."
-            exit 1
-        }
+        PORTA_LOCAL=$(shuf -i 30000-39999 -n 1)
+        log INFO "Usando automaticamente porta alta disponível: $PORTA_LOCAL"
+    else
+        log OK "Porta padrão $PORTA_LOCAL está livre."
     fi
 }
 
