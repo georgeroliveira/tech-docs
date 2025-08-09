@@ -1,0 +1,15 @@
+# Arquivos de sistema macOS
+.DS_Store
+
+# Arquivos temporários ou de backup
+*.log
+*.tmp
+*.swp
+
+# Arquivos específicos que não devem ir para o repositório
+risco-chatpt.md
+
+# Pastas de cache
+.cache/
+node_modules/
+
